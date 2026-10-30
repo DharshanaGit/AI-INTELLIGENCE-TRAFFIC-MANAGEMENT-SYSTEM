@@ -1,65 +1,53 @@
-# Credentials & Environment Variables
-.env
-*.env
-backend/.env
-backend/.env.local
-frontend/.env
-*.env.local
-!backend/.env.example
-!.env.example
+# Virtual environments & dependencies
+.venv/
+venv/
+env/
+node_modules/
+dist/
 
-# Python
+# Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-.venv/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+*.class
 *.egg-info/
-.installed.cfg
-*.egg
+.pytest_cache/
 
-# Node & Frontend
-node_modules/
-frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Uploads & Temporary buffers & Local DB
-backend/uploads/
-backend/data/
+# Database and Runtime Generated Storage
+backend/traffic_system.db
+backend/traffic_system.db-journal
+backend/traffic_system.db-wal
+backend/traffic_system.db-shm
 *.db
 *.sqlite3
 
-# Large Media Files (>100MB exceeds GitHub push limits)
-*.mp4
-*.avi
-*.mov
-*.mkv
-Traffic Videos/*.mp4
-Traffic Videos/*.avi
+# Runtime violation captures and heavy videos
+backend/storage/snapshots/*
+backend/storage/challans/*
+backend/storage/reports/*
+backend/storage/video_samples/*
+!backend/storage/**/.gitkeep
 
-# IDE & OS
+# Heavy weights exceeding GitHub 100MB file limit
+backend/yolov8x.pt
+
+# Temporary testing scripts
+backend/test_pipeline.py
+backend/test_*.py
+test_*.py
+scratch/
+*.log
+
+# Editor & Agent metadata
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
+.gemini/
+.system_generated/
+
+# Heavy sample video recordings
+backend/sample_data/
+
+# Scratch scripts
+backend/scratch_*.py
+scratch_*.py
+
+backend/yolov8m.pt
