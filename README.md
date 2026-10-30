@@ -1,82 +1,98 @@
-# AI Intelligent Traffic Management System
+# AI-Powered Intelligent Traffic Management System (ITMS)
 
-A real-time, cloud-assisted traffic management and violation enforcement platform powered by **OpenCV frame stabilization**, **Google Gemini Vision Flash**, **FastAPI (Python)**, **MongoDB Atlas**, and a **React.js Dashboard**.
-
----
-
-## Architecture & Modules Implemented
-
-### 🚗 Module 1: Video Processing & Stabilization Pipeline
-- **Ingestion**: Accepts `.mp4`, `.avi`, and `.mov` video uploads via `multipart/form-data` with temporary file buffering.
-- **OpenCV Pipeline**: Normalizes video stream to standard 720p resolution ($1280 \times 720$).
-- **Frame Stabilization**: Applies Lucas-Kanade optical flow tracking and affine transformation smoothing to eliminate camera vibrations from wind and heavy vehicles.
-
-### 🧠 Module 2: Object Detection & Classification
-- **Cloud Vision Dispatch**: Sends video keyframes to **Google Gemini Flash API** (`gemini-3.5-flash` / `gemini-3.8-flash`).
-- **Visual Classification**: Categorizes vehicles into `Cars`, `Buses`, `Trucks`, `Two-wheelers`, `Ambulances`, and `Fire Engines` with normalized 2D bounding boxes `[ymin, xmin, ymax, xmax]`.
-- **Non-blocking Flow**: Utilizes high-speed local computer vision tracking between cloud inference intervals for continuous ~20 FPS dashboard rendering.
-
-### 🚨 Module 3: Traffic Violation & License Plate OCR
-- **Scenario A (Red-Light Crossing)**: Tests intersection stop-line coordinate crossings when the active lane signal is `RED`.
-- **Scenario B (Wrong-Way Driving)**: Computes the cosine similarity of vehicle motion direction vectors against established lane trajectories ($\cos\theta < -0.6$).
-- **License Plate OCR Extraction**: Crops vehicle bumper regions and extracts alphanumeric license plate text via Gemini Vision OCR, storing evidence snapshots in `backend/uploads/violations/`.
-
-### 🚦 Module 4: Dynamic Adaptive Signal Controller
-- **Spatial Weighted Density**: Computes physical lane occupancy:
-  - $\text{Bus} = 4\times \text{Car}$
-  - $\text{Truck} = 3.5\times \text{Car}$
-  - $\text{Two-wheeler} = 0.5\times \text{Car}$
-- **Adaptive Matrix Rule**: If $\text{Lane 1 Density} \ge 75\%$ and $\text{Lane 2 Density} \le 20\%$, dynamically extends the green light timer by $+20$ seconds.
-- **Emergency Preemption ("Green Wall")**: Detecting an `Ambulance` or `Fire Engine` instantly overrides cycles to force an immediate green wave corridor for the emergency lane.
-
-### 📊 Module 5: Real-Time Visualization Dashboard
-- **React.js (Pure JavaScript)** with CSS Modules and glassmorphism dark theme.
-- **WebSocket Streaming**: Consumes live 20 FPS telemetry over `ws://localhost:8000/api/v1/ws/traffic`.
-- **Canvas Video Feed**: Renders live bounding boxes, classification badges, and virtual stop-lines.
-- **Chart.js Flow Graph**: Live time-series density and throughput line chart.
-- **Animated Traffic Lights**: Real-time signal colors, remaining cycle timers, and override banners.
-
-### ✉️ Module 6: Alert & Notification Gateway
-- Dispatches high-priority violation notifications asynchronously via Python `smtplib` over Google SMTP (TLS port 587).
-- Supports cellular carrier email-to-SMS gateways (e.g. `number@tmomail.net`, `number@vtext.com`).
-
-### 🗄️ Module 7: Database & Indexing System
-- Async database operations via **Motor** with automated fallback engine.
-- High-speed compound indexes compiled on `timestamp` and `license_plate` for fast audits.
+An end-to-end computer vision and intelligent urban traffic control platform designed to monitor multi-lane intersections, track vehicles, enforce traffic violations, and dynamically optimize traffic light timings in real time.
 
 ---
 
-## 🚀 Quick Start Guide
+## Key Highlights & Features
 
-### 1. Prerequisites
-- Python 3.11+
-- Node.js 18+ & npm
+1. **Multi-Class Vehicle Detection (YOLOv8)**:
+   - Detects and categorizes cars, motorcycles, buses, trucks, and emergency vehicles (ambulances).
+   - Real-time CPU and GPU acceleration support.
 
-### 2. Environment Configuration
-Verify credentials in `backend/.env`:
-```env
-GEMINI_API_KEY=your_gemini_api_key
-MONGODB_URI=your_mongodb_atlas_uri
-DATABASE_NAME=traffic_db
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your_email@gmail.com
-SMTP_PASS=your_app_password
-ALERT_RECIPIENT_SMS_GATEWAY=your_phone@carrier.net
-ALERT_RECIPIENT_EMAIL=traffic_control@domain.com
+2. **Multi-Object Tracking (MOT) & Trajectory Analysis**:
+   - Tracks each vehicle with a persistent unique ID.
+   - Computes real-time movement velocity vectors, path history, and calibrated ground-plane speed ($km/h$).
+
+3. **Automated Traffic Violation Detection**:
+   - **Signal Jumping**: Triggers when a vehicle crosses the virtual stop line while the lane signal is RED.
+   - **Wrong-Way Driving**: Flags vehicles moving against the permitted lane direction vector.
+   - **Overspeeding**: Measures calibrated vehicular speed against intersection speed limits.
+
+4. **Automated Number Plate Recognition (ANPR)**:
+   - Extracts license plate strings upon violation.
+   - Crops and annotates photographic evidence snapshots.
+
+5. **Dynamic Adaptive Traffic Signal Control**:
+   - Adjusts green light durations dynamically based on real-time vehicle queue density.
+   - **Emergency Vehicle Preemption**: Instantly forces a GREEN signal to clear path whenever an ambulance or emergency vehicle approaches.
+
+6. **Automated Digital E-Challan PDF Generator**:
+   - Generates official PDF tickets containing camera ID, timestamp, license plate, violation description, penalty amount, and photographic evidence.
+
+7. **High-Tech Control Center Dashboard**:
+   - Real-time MJPEG live camera stream with AI HUD bounding boxes and trajectory trails.
+   - Interactive 4-lane signal visualizer with countdown timers and manual override buttons.
+   - Live telemetry charts, congestion gauges, and filterable violation incident logs.
+
+---
+
+## System Architecture
+
+```
+[Camera Feed / Video / Synthetic Generator]
+                  │
+                  ▼
+         [YOLOv8 Object Detector]
+                  │
+                  ▼
+        [Multi-Object Tracker]
+      (Persistent IDs & Trajectories)
+        │                       │
+        ▼                       ▼
+ [Violation Engine]      [Adaptive Signal Controller]
+ (Red Light, Wrong Way)  (Queue Density & Emergency Preemption)
+        │                       │
+        ▼                       ▼
+ [ANPR & E-Challan Gen]  [WebSocket & REST API (FastAPI)]
+        │                       │
+        └───────────┬───────────┘
+                    ▼
+       [React Command Center UI]
 ```
 
-### 3. Running Backend
+---
+
+## Quick Start Guide
+
+### Option A: One-Click Launch (Windows)
+Double-click:
+```bat
+start_all.bat
+```
+This automatically launches both the FastAPI backend and the React frontend in separate command windows.
+
+### Option B: Manual Startup
+
+#### 1. Backend:
 ```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --app-dir backend
+cd backend
+.venv\Scripts\activate
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
-Backend API will be running at: `http://localhost:8000`  
-Interactive Swagger docs: `http://localhost:8000/docs`
+* Backend API & Docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+* Live Video Stream: [http://localhost:8000/api/video_feed](http://localhost:8000/api/video_feed)
 
-### 4. Running Frontend
+#### 2. Frontend:
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
-Frontend Dashboard will be accessible at: `http://localhost:5173`
+* Dashboard URL: [http://localhost:5173](http://localhost:5173)
+
+---
+
+## Tech Stack
+* **Computer Vision & AI**: Python 3.11, Ultralytics YOLOv8, OpenCV, NumPy, ByteTrack / Centroid Tracking.
+* **Backend**: FastAPI, Uvicorn, WebSockets, SQLAlchemy, SQLite, ReportLab (PDF Generation).
+* **Frontend**: React 19, Vite, Tailwind CSS / Custom Glassmorphism, Lucide Icons.
