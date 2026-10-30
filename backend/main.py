@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -23,9 +23,11 @@ STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 SNAPSHOTS_DIR = os.path.join(STORAGE_DIR, "snapshots")
 CHALLANS_DIR = os.path.join(STORAGE_DIR, "challans")
 REPORTS_DIR = os.path.join(STORAGE_DIR, "reports")
+SAMPLE_DATA_DIR = os.path.join(BASE_DIR, "sample_data")
 os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 os.makedirs(CHALLANS_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
+os.makedirs(SAMPLE_DATA_DIR, exist_ok=True)
 
 # Initialize database schema and migrations
 init_db()
@@ -40,11 +42,36 @@ app = FastAPI(
 # CORS setup for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
+        "http://127.0.0.1:3000",
+        "*"
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+            "Access-Control-Allow-Credentials": "true"
+        }
+    )
 
 # Mount static asset folders for incident evidence and hourly reports
 app.mount("/api/snapshots", StaticFiles(directory=SNAPSHOTS_DIR), name="snapshots")
@@ -149,6 +176,9 @@ class SignalOverrideRequest(BaseModel):
 class ModelSelectRequest(BaseModel):
     model_name: str
 
+class LoopRequest(BaseModel):
+    loop: bool
+
 class ModeSwitchRequest(BaseModel):
     mode: str # "live" or "footage"
 
@@ -245,14 +275,18 @@ async def video_feed():
 @app.get("/api/stats")
 def get_live_stats():
     """Returns latest telemetry, vehicle queue counts, signal statuses, and census breakdown"""
-    stats = pipeline.last_stats.copy() if pipeline.last_stats else {
-        "total_vehicles": 0,
-        "congestion_index": 0,
-        "lane_counts": {1: 0, 2: 0, 3: 0, 4: 0},
-        "signal_state": pipeline.signal_controller.get_states(),
-        "vehicle_census": pipeline.vehicle_class_counts.copy(),
-        "new_violations": []
-    }
+    if pipeline.last_stats:
+        stats = pipeline.last_stats.copy()
+    else:
+        stats = {
+            "total_vehicles": 0,
+            "congestion_index": 0,
+            "lane_counts": {1: 0, 2: 0, 3: 0, 4: 0},
+            "signal_state": pipeline.signal_controller.get_states(),
+            "vehicle_census": pipeline.vehicle_class_counts.copy(),
+            "new_violations": []
+        }
+    stats["vehicle_census"] = pipeline._normalize_census(stats.get("vehicle_census", pipeline.vehicle_class_counts))
     return stats
 
 # ==========================================
@@ -292,10 +326,19 @@ def get_footage_status():
 def start_footage(req: FootageStartRequest):
     """Starts single-pass 1-time run of specified or loaded footage"""
     res = pipeline.start_footage_analysis(req.filename)
-    if not res.get("success"):
-        raise HTTPException(status_code=400, detail=res.get("error", "Failed to start footage analysis"))
-    log_event("INFO", "FOOTAGE_ANALYSIS", f"Started 1-time forensic analysis on: {res.get('filename')}")
-    return res
+    if isinstance(res, tuple):
+        success, msg = res
+    elif isinstance(res, dict):
+        success = res.get("success", True)
+        msg = res.get("message", "")
+    else:
+        success = bool(res)
+        msg = str(res)
+
+    if not success:
+        raise HTTPException(status_code=400, detail=msg or "Failed to start footage analysis")
+    log_event("INFO", "FOOTAGE_ANALYSIS", f"Started forensic analysis on: {req.filename}")
+    return {"success": True, "message": msg, "filename": req.filename}
 
 @app.post("/api/footage/pause")
 def pause_footage():
@@ -313,6 +356,11 @@ def restart_footage():
     pipeline.restart_footage()
     log_event("INFO", "FOOTAGE_ANALYSIS", "Footage analysis restarted from frame 0.")
     return {"message": "Footage restarted from frame 0", "status": pipeline.get_footage_status()}
+
+@app.post("/api/footage/loop")
+def toggle_footage_loop(req: LoopRequest):
+    pipeline.set_loop(req.loop)
+    return {"message": f"Footage loop set to {req.loop}", "loop": req.loop, "status": pipeline.get_footage_status()}
 
 # ==========================================
 # Violations & Statutory Proof Ledger
@@ -433,6 +481,16 @@ def list_available_feeds():
     ]
 
     CCTV_LABELS = {
+        "indian_traffic_signal_violation.mp4": "Indian CCTV: Red Light Signal Violation & Intersection (746 frames)",
+        "indian_cctv_junction_flow.mp4": "Indian CCTV: City Junction Mixed Traffic & Violations",
+        "indian_expressway_violations.mp4": "Indian Highway: Expressway Speeding & Lane Violation CCTV",
+        "madurai_highway.mp4": "Madurai - NH44 Southern Highway (Tamil Nadu CCTV)",
+        "indian_arterial_traffic.mp4": "Indian Urban Arterial Corridor (High-Density Flow)",
+        "indian_city_junction.mkv": "Indian Multi-Modal City Junction (Bikes, Autos & Cars)",
+        "madurai_highway.mp4": "Madurai - NH44 Southern Highway (Tamil Nadu CCTV)",
+        "indian_arterial_traffic.mp4": "Indian Urban Arterial Corridor (High-Density Flow)",
+        "indian_city_junction.mkv": "Indian Multi-Modal City Junction (Bikes, Autos & Cars)",
+        "traffic.mp4": "Uploaded Traffic Clip (Forensic CCTV)",
         "v1.mp4": "Indian Highway - Corridor Alpha (4K CCTV)",
         "v2.mp4": "Urban Arterial Road - Sector Beta (4K CCTV)",
         "v3.mp4": "City Junction - Mixed Traffic Flow (4K CCTV)",
@@ -475,11 +533,12 @@ def list_available_feeds():
                 files.append({
                     "id": f,
                     "name": label,
-                    "type": "footage_recording",
+                    "type": "custom_upload" if f not in CCTV_LABELS else "footage_recording",
                     "quality": "high",
                     "resolution": "3840x2160",
                     "size_mb": round(os.path.getsize(p) / (1024 * 1024), 2),
-                    "filename": f
+                    "filename": f,
+                    "is_custom": f not in CCTV_LABELS
                 })
 
     return {
@@ -505,16 +564,56 @@ def select_feed(req: FeedSelectRequest):
     res = pipeline.start_footage_analysis(feed)
     return {"message": f"Loaded recorded footage: {feed} (Single-Pass 1-Time Run)", "source": feed, "result": res}
 
+@app.delete("/api/feed/{filename}")
+@app.post("/api/feed/{filename}/remove")
+def remove_feed_video(filename: str):
+    """Deletes a video file from sample_data and unloads it if currently active"""
+    sample_dir = os.path.join(BASE_DIR, "sample_data")
+    file_path = os.path.join(sample_dir, filename)
+    
+    # Unload from pipeline if currently playing
+    if pipeline.custom_video_source and (os.path.basename(pipeline.custom_video_source) == filename or filename in pipeline.custom_video_source):
+        with pipeline.cap_lock:
+            if pipeline.cap:
+                pipeline.cap.release()
+                pipeline.cap = None
+            pipeline.footage_loaded = False
+            pipeline.analysis_in_progress = False
+            pipeline.analysis_complete = False
+            pipeline.custom_video_source = None
+            pipeline.frame_idx = 0
+            pipeline.total_frames = 1
+            pipeline.last_real_frame = None
+            pipeline.last_annotated_frame = None
+        log_event("INFO", "VIDEO_UNLOAD", f"Unloaded active video {filename}")
+
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            log_event("INFO", "VIDEO_DELETE", f"Removed video file {filename}")
+            return {"success": True, "message": f"Successfully deleted video {filename}"}
+        except Exception as e:
+            log_event("ERROR", "VIDEO_DELETE", f"Failed to delete {filename}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to delete video file: {str(e)}")
+    else:
+        return {"success": True, "message": f"Video {filename} unloaded from active state."}
+
 @app.post("/api/feed/upload")
 async def upload_video(file: UploadFile = File(...)):
     """Uploads custom traffic MP4 video clip to process in Footage Mode"""
-    save_path = os.path.join(BASE_DIR, "sample_data", file.filename)
-    with open(save_path, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
-    pipeline.start_footage_analysis(save_path)
-    log_event("INFO", "UPLOAD", f"Uploaded user footage: {file.filename}")
-    return {"message": f"Custom traffic video loaded: {file.filename} for forensic examination", "path": save_path}
+    try:
+        sample_dir = os.path.join(BASE_DIR, "sample_data")
+        os.makedirs(sample_dir, exist_ok=True)
+        save_path = os.path.join(sample_dir, file.filename)
+        with open(save_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                buffer.write(chunk)
+        res = pipeline.start_footage_analysis(save_path)
+        log_event("INFO", "UPLOAD", f"Uploaded user footage: {file.filename}")
+        return {"message": f"Custom traffic video loaded: {file.filename} for forensic examination", "path": save_path, "result": res}
+    except Exception as e:
+        log_event("ERROR", "UPLOAD", f"Failed to process uploaded video {file.filename}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process uploaded video: {str(e)}")
 
 # ==========================================
 # Dual-Mode Switching
@@ -951,6 +1050,7 @@ async def websocket_telemetry(websocket: WebSocket):
         while True:
             stats = pipeline.last_stats.copy() if pipeline.last_stats else {}
             if stats:
+                stats["vehicle_census"] = pipeline._normalize_census(stats.get("vehicle_census", pipeline.vehicle_class_counts))
                 await websocket.send_json(stats)
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:

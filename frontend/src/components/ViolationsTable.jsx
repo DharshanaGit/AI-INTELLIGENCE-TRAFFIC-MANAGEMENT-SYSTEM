@@ -68,10 +68,10 @@ export default function ViolationsTable({ violations = [] }) {
                   <td>
                     {v.image_snapshot ? (
                       <img
-                        src={`http://localhost:8000${v.image_snapshot}`}
+                        src={`http://localhost:8005${v.image_snapshot}`}
                         alt="Violation Proof"
                         className={styles.tableThumbnail}
-                        onClick={() => setSelectedSnapshot(`http://localhost:8000${v.image_snapshot}`)}
+                        onClick={() => setSelectedSnapshot(`http://localhost:8005${v.image_snapshot}`)}
                         onError={(e) => { e.target.style.display = 'none'; }}
                       />
                     ) : (

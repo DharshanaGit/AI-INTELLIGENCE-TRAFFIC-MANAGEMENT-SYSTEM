@@ -56,6 +56,7 @@ import {
   ChevronLeft,
   Upload,
   PlayCircle,
+  Repeat,
   Mail,
   Key,
   Shield,
@@ -281,6 +282,8 @@ export default function App() {
   const [availableFeeds, setAvailableFeeds] = useState([]);
   const [activeFeedId, setActiveFeedId] = useState("v1.mp4");
   const [isUploading, setIsUploading] = useState(false);
+  const [footageLoop, setFootageLoop] = useState(true);
+  const [videoFeedKey, setVideoFeedKey] = useState(Date.now());
   const [footageStatus, setFootageStatus] = useState({
     completed: false,
     current_frame: 0,
@@ -778,32 +781,56 @@ export default function App() {
 
   // WebSocket Live Telemetry Stream
   useEffect(() => {
-    let ws;
+    let ws = null;
+    let isMounted = true;
+    let timer = null;
     const connect = () => {
-      ws = new WebSocket(WS_URL);
-      ws.onopen = () => setWsConnected(true);
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          setTelemetry(prev => ({
-            ...prev,
-            ...data,
-            total_vehicles: data.total_vehicles !== undefined ? data.total_vehicles : prev.total_vehicles,
-            signal_state: data.signal_state || prev.signal_state,
-            vehicle_census: data.vehicle_census || prev.vehicle_census
-          }));
-          if (data.new_violations && data.new_violations.length > 0) {
-            fetchLiveViolations();
+      if (!isMounted) return;
+      try {
+        ws = new WebSocket(WS_URL);
+        ws.onopen = () => { if (isMounted) setWsConnected(true); };
+        ws.onmessage = (event) => {
+          if (!isMounted) return;
+          try {
+            const data = JSON.parse(event.data);
+            setTelemetry(prev => ({
+              ...prev,
+              ...data,
+              total_vehicles: data.total_vehicles !== undefined ? data.total_vehicles : prev.total_vehicles,
+              signal_state: data.signal_state || prev.signal_state,
+              vehicle_census: data.vehicle_census || prev.vehicle_census
+            }));
+            if (data.new_violations && data.new_violations.length > 0) {
+              fetchLiveViolations();
+            }
+          } catch (e) {}
+        };
+        ws.onclose = () => {
+          if (!isMounted) return;
+          setWsConnected(false);
+          timer = setTimeout(connect, 3000);
+        };
+        ws.onerror = () => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.close();
           }
-        } catch (e) {}
-      };
-      ws.onclose = () => {
-        setWsConnected(false);
-        setTimeout(connect, 3000);
-      };
+        };
+      } catch (e) {}
     };
     connect();
-    return () => { if (ws) ws.close(); };
+    return () => {
+      isMounted = false;
+      if (timer) clearTimeout(timer);
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+      }
+    };
   }, []);
 
   // ==========================================
@@ -860,7 +887,8 @@ export default function App() {
       });
       if (res.ok) {
         setActiveFeedId(filename);
-        setFeedToast(`Started 1-Time Forensic Analysis on ${filename}`);
+        setVideoFeedKey(Date.now());
+        setFeedToast(`Started Live Frame-by-Frame YOLO Analysis on ${filename}`);
         setTimeout(() => setFeedToast(""), 4000);
         await fetchFootageStatus();
         await fetchCapturedPlates();
@@ -869,6 +897,67 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const handlePauseFootage = async () => {
+    try {
+      await fetch(`${API_BASE}/api/footage/pause`, { method: "POST" });
+      await fetchFootageStatus();
+    } catch (e) {}
+  };
+
+  const handleResumeFootage = async () => {
+    try {
+      await fetch(`${API_BASE}/api/footage/resume`, { method: "POST" });
+      await fetchFootageStatus();
+    } catch (e) {}
+  };
+
+  const handleRemoveVideo = async (filename) => {
+    const target = filename || footageStatus.current_source || activeFeedId;
+    if (!target) {
+      alert("No video selected to remove.");
+      return;
+    }
+    if (!confirm(`Are you sure you want to remove "${target}"?`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/feed/${encodeURIComponent(target)}`, {
+        method: "DELETE"
+      });
+      if (res.ok) {
+        setFeedToast(`Removed "${target}". You can now upload or select a new video.`);
+        setTimeout(() => setFeedToast(""), 4000);
+        if (activeFeedId === target) setActiveFeedId("");
+        setVideoFeedKey(Date.now());
+        await fetchAvailableFeeds();
+        await fetchFootageStatus();
+      } else {
+        alert("Failed to remove video.");
+      }
+    } catch (e) {
+      alert("Error removing video.");
+    }
+  };
+
+  const handleRestartFootage = async () => {
+    try {
+      await fetch(`${API_BASE}/api/footage/restart`, { method: "POST" });
+      setVideoFeedKey(Date.now());
+      await fetchFootageStatus();
+    } catch (e) {}
+  };
+
+  const handleToggleLoop = async () => {
+    const nextLoop = !footageLoop;
+    setFootageLoop(nextLoop);
+    try {
+      await fetch(`${API_BASE}/api/footage/loop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loop: nextLoop })
+      });
+      await fetchFootageStatus();
+    } catch (e) {}
   };
 
   const handleUploadCCTV = async (e) => {
@@ -883,10 +972,11 @@ export default function App() {
         body: formData
       });
       if (res.ok) {
-        setFeedToast(`Uploaded and Initiated 1-Time Analysis: ${file.name}`);
+        setFeedToast(`Uploaded and Initiated Live Analysis: ${file.name}`);
         setTimeout(() => setFeedToast(""), 4000);
         await fetchAvailableFeeds();
         setActiveFeedId(file.name);
+        setVideoFeedKey(Date.now());
         await fetchFootageStatus();
       } else {
         alert("Upload failed. Verify MP4 video format.");
@@ -1824,7 +1914,7 @@ export default function App() {
               <div className="card" style={{ padding: '18px 20px', borderLeft: '4px solid #0284c7' }}>
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>Total Vehicles Tracked</div>
                 <div style={{ fontSize: '28px', fontWeight: 800, marginTop: '2px', color: '#0f172a' }}>
-                  {operatingMode === 'live' ? (liveStatus.active ? telemetry.total_vehicles : 0) : (footageStatus.total_frames > 0 ? (telemetry.vehicle_census.cars + telemetry.vehicle_census.two_wheelers + telemetry.vehicle_census.auto_rickshaws + telemetry.vehicle_census.buses + telemetry.vehicle_census.trucks) : 0)}
+                  {operatingMode === 'live' ? (liveStatus.active ? (telemetry.total_vehicles || 0) : 0) : (((telemetry.vehicle_census?.cars ?? telemetry.vehicle_census?.car ?? 0) + (telemetry.vehicle_census?.two_wheelers ?? telemetry.vehicle_census?.two_wheeler ?? 0) + (telemetry.vehicle_census?.auto_rickshaws ?? telemetry.vehicle_census?.auto_rickshaw ?? 0) + (telemetry.vehicle_census?.buses ?? telemetry.vehicle_census?.bus ?? 0) + (telemetry.vehicle_census?.trucks ?? telemetry.vehicle_census?.truck ?? 0)) || (telemetry.total_vehicles || 0))}
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
                   {operatingMode === 'live' ? 'Across active surveillance nodes' : 'Unique vehicles registered in clip'}
@@ -2150,43 +2240,209 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Status Banner when analyzing */}
-              {footageStatus.total_frames > 0 && (
+              {/* Live Video Surveillance & Detection Feed Player */}
+              <div style={{
+                position: 'relative',
+                borderRadius: '12px',
+                overflow: 'hidden',
+                border: '2px solid #1e293b',
+                backgroundColor: '#070b14',
+                boxShadow: 'var(--shadow-lg)',
+                display: 'flex',
+                flexDirection: 'column'
+              }}>
+                {/* Player Toolbar */}
                 <div style={{
-                  padding: '14px 18px',
-                  borderRadius: '10px',
-                  backgroundColor: footageStatus.completed ? '#ecfdf5' : '#f0f9ff',
-                  border: `1.5px solid ${footageStatus.completed ? '#a7f3d0' : '#bae6fd'}`,
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
+                  padding: '12px 18px',
+                  backgroundColor: '#0f172a',
+                  borderBottom: '1px solid #1e293b',
                   flexWrap: 'wrap',
-                  gap: '12px'
+                  gap: '10px'
                 }}>
-                  <div>
-                    <div style={{ fontSize: '13px', fontWeight: 800, color: footageStatus.completed ? '#065f46' : '#0369a1' }}>
-                      {footageStatus.completed ? "Single-Pass Analysis Complete (100% Freezed)" : `Forensic Analysis in Progress: ${activeFeedId}`}
-                    </div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                      Processed {footageStatus.current_frame} of {footageStatus.total_frames} frames ({footageStatus.progress_pct}%)
-                    </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{
+                      width: '10px',
+                      height: '10px',
+                      borderRadius: '50%',
+                      backgroundColor: footageStatus.is_paused ? '#f59e0b' : '#10b981',
+                      boxShadow: `0 0 10px ${footageStatus.is_paused ? '#f59e0b' : '#10b981'}`
+                    }} />
+                    <span style={{ fontSize: '13.5px', fontWeight: 800, color: '#f8fafc' }}>
+                      Live Video Analysis Feed: {footageStatus.current_source || activeFeedId}
+                    </span>
+                    <span className="badge" style={{ backgroundColor: '#1e293b', color: '#38bdf8', fontSize: '11px', fontWeight: 700 }}>
+                      YOLOv8 Real-time HUD
+                    </span>
                   </div>
 
-                  <div style={{ display: 'flex', gap: '8px' }}>
+                  {/* Playback Controls */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {footageStatus.is_paused ? (
+                      <button
+                        onClick={handleResumeFootage}
+                        className="btn-primary"
+                        style={{ padding: '6px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px', backgroundColor: '#10b981', borderColor: '#10b981' }}
+                      >
+                        <Play size={13} /> Resume
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handlePauseFootage}
+                        className="btn-secondary"
+                        style={{ padding: '6px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                      >
+                        <Pause size={13} /> Pause
+                      </button>
+                    )}
+                    <button
+                      onClick={handleRestartFootage}
+                      className="btn-secondary"
+                      style={{ padding: '6px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                      title="Replay from Beginning"
+                    >
+                      <RotateCcw size={13} /> Replay
+                    </button>
+                    <button
+                      onClick={handleToggleLoop}
+                      className={footageLoop ? "btn-primary" : "btn-secondary"}
+                      style={{ padding: '6px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                      title="Toggle Continuous Loop"
+                    >
+                      <Repeat size={13} /> {footageLoop ? "Loop: ON" : "Loop: OFF"}
+                    </button>
+                    <button
+                      onClick={() => handleRemoveVideo(footageStatus.current_source || activeFeedId)}
+                      className="btn-secondary"
+                      style={{ padding: '6px 14px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px', color: '#ef4444', borderColor: '#fca5a5' }}
+                      title="Delete current video so you can upload a new one"
+                    >
+                      <Trash2 size={13} /> Remove Video
+                    </button>
                     <button
                       onClick={() => setActiveTab("Traffic Analytics")}
                       className="btn-primary"
-                      style={{ fontSize: '12px', padding: '6px 14px' }}
+                      style={{ fontSize: '12px', padding: '6px 14px', display: 'flex', alignItems: 'center', gap: '5px' }}
                     >
                       <Activity size={13} /> View Vehicle Census
                     </button>
                     <button
                       onClick={() => setActiveTab("Reports")}
                       className="btn-secondary"
-                      style={{ fontSize: '12px', padding: '6px 14px' }}
+                      style={{ fontSize: '12px', padding: '6px 14px', display: 'flex', alignItems: 'center', gap: '5px' }}
                     >
                       <FileText size={13} /> View Audit Report
                     </button>
+                  </div>
+                </div>
+
+                {/* Video Image Stream */}
+                <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', backgroundColor: '#070b14' }}>
+                  <img
+                    src={`${API_BASE}/api/video_feed?t=${videoFeedKey}`}
+                    alt="Traffic AI Forensic Live Feed"
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+                  />
+                </div>
+
+                {/* Progress Bar & Frame Status */}
+                <div style={{ padding: '12px 18px', backgroundColor: '#0f172a', borderTop: '1px solid #1e293b' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', color: '#94a3b8', marginBottom: '8px' }}>
+                    <span>Frame: <strong style={{ color: '#f8fafc' }}>{footageStatus.current_frame}</strong> / {footageStatus.total_frames}</span>
+                    <span>Progress: <strong style={{ color: '#38bdf8' }}>{footageStatus.progress_pct}%</strong></span>
+                    <span>Status: <strong style={{ color: footageStatus.is_paused ? '#f59e0b' : '#10b981' }}>{footageStatus.is_paused ? "Playback Paused (Click Resume to Play)" : "Live Video Surveillance Active (Continuous)"}</strong></span>
+                  </div>
+                  <div style={{ width: '100%', height: '6px', backgroundColor: '#1e293b', borderRadius: '3px', overflow: 'hidden' }}>
+                    <div style={{ width: `${footageStatus.progress_pct}%`, height: '100%', backgroundColor: '#0284c7', transition: 'width 0.2s' }} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Custom Uploaded Videos Section (if any) */}
+              {availableFeeds.some(f => f.is_custom || (!f.filename?.startsWith('v') && f.type !== 'live_stream')) && (
+                <div>
+                  <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '12px', color: '#0f172a' }}>
+                    Uploaded Custom CCTV Recordings
+                  </h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px' }}>
+                    {availableFeeds
+                      .filter(f => f.is_custom || (!f.filename?.startsWith('v') && f.type !== 'live_stream'))
+                      .map((feed) => {
+                        const isSelected = activeFeedId === feed.id || activeFeedId === feed.filename;
+                        return (
+                          <div
+                            key={feed.id}
+                            style={{
+                              padding: '14px',
+                              borderRadius: '10px',
+                              backgroundColor: isSelected ? '#f0f9ff' : '#ffffff',
+                              border: isSelected ? '2px solid #0284c7' : '1px solid var(--border-light)',
+                              boxShadow: 'var(--shadow-sm)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              justifyContent: 'space-between',
+                              gap: '10px'
+                            }}
+                          >
+                            <div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '11px', fontWeight: 800, color: '#0284c7' }}>
+                                  CUSTOM VIDEO
+                                </span>
+                                <span style={{ fontSize: '10px', color: 'var(--text-muted)', backgroundColor: '#f1f5f9', padding: '2px 6px', borderRadius: '4px' }}>
+                                  {feed.size_mb} MB
+                                </span>
+                              </div>
+                              <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)', marginTop: '4px', wordBreak: 'break-all' }}>
+                                {feed.filename || feed.name}
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <button
+                                onClick={() => handleStartFootageAnalysis(feed.filename)}
+                                style={{
+                                  flex: 1,
+                                  padding: '7px 12px',
+                                  borderRadius: '6px',
+                                  border: 'none',
+                                  backgroundColor: isSelected ? '#0284c7' : '#0f172a',
+                                  color: '#ffffff',
+                                  fontSize: '11.5px',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <Play size={12} /> {isSelected ? "Re-play & Analyze" : "Play & Analyze Live"}
+                              </button>
+                              <button
+                                onClick={() => handleRemoveVideo(feed.filename)}
+                                style={{
+                                  padding: '7px 10px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #fee2e2',
+                                  backgroundColor: '#fef2f2',
+                                  color: '#ef4444',
+                                  fontSize: '11.5px',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}
+                                title="Delete this video"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                   </div>
                 </div>
               )}
@@ -2199,7 +2455,7 @@ export default function App() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px' }}>
                   {availableFeeds
-                    .filter(f => f.filename && f.filename.startsWith('v'))
+                    .filter(f => f.filename && (f.filename.startsWith('v') || f.filename.includes('indian') || f.filename.includes('madurai') || f.filename.includes('traffic')))
                     .map((feed) => {
                       const isSelected = activeFeedId === feed.id;
                       return (
@@ -2248,7 +2504,7 @@ export default function App() {
                               gap: '6px'
                             }}
                           >
-                            <Play size={12} /> {isSelected ? "Re-run 1-Time Analysis" : "Select & Analyze"}
+                            <Play size={12} /> {isSelected ? "Re-run Analysis" : "Select & Analyze"}
                           </button>
                         </div>
                       );
@@ -2299,28 +2555,28 @@ export default function App() {
                 <div className="card" style={{ padding: '18px 20px', borderLeft: '4px solid #0284c7' }}>
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>Cars & Sedans</div>
                   <div style={{ fontSize: '28px', fontWeight: 800, marginTop: '2px', color: '#0f172a' }}>
-                    {telemetry.vehicle_census.cars}
+                    {telemetry.vehicle_census?.cars ?? telemetry.vehicle_census?.car ?? 0}
                   </div>
                 </div>
 
                 <div className="card" style={{ padding: '18px 20px', borderLeft: '4px solid #10b981' }}>
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>Two-Wheelers & Bikes</div>
                   <div style={{ fontSize: '28px', fontWeight: 800, marginTop: '2px', color: '#059669' }}>
-                    {telemetry.vehicle_census.two_wheelers}
+                    {telemetry.vehicle_census?.two_wheelers ?? telemetry.vehicle_census?.two_wheeler ?? 0}
                   </div>
                 </div>
 
                 <div className="card" style={{ padding: '18px 20px', borderLeft: '4px solid #f59e0b' }}>
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>Auto-Rickshaws (3-Wheelers)</div>
                   <div style={{ fontSize: '28px', fontWeight: 800, marginTop: '2px', color: '#d97706' }}>
-                    {telemetry.vehicle_census.auto_rickshaws}
+                    {telemetry.vehicle_census?.auto_rickshaws ?? telemetry.vehicle_census?.auto_rickshaw ?? 0}
                   </div>
                 </div>
 
                 <div className="card" style={{ padding: '18px 20px', borderLeft: '4px solid #7c3aed' }}>
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>Heavy Freight (Trucks & Buses)</div>
                   <div style={{ fontSize: '28px', fontWeight: 800, marginTop: '2px', color: '#7c3aed' }}>
-                    {telemetry.vehicle_census.buses + telemetry.vehicle_census.trucks}
+                    {(telemetry.vehicle_census?.buses ?? telemetry.vehicle_census?.bus ?? 0) + (telemetry.vehicle_census?.trucks ?? telemetry.vehicle_census?.truck ?? 0)}
                   </div>
                 </div>
               </div>
@@ -2339,11 +2595,11 @@ export default function App() {
                 <div style={{ display: 'flex', gap: '24px' }}>
                   <div style={{ textAlign: 'center' }}>
                     <div style={{ fontSize: '11px', color: '#6b21a8', fontWeight: 700 }}>Adult Pedestrians</div>
-                    <div style={{ fontSize: '24px', fontWeight: 900, color: '#6b21a8' }}>{telemetry.vehicle_census.pedestrians}</div>
+                    <div style={{ fontSize: '24px', fontWeight: 900, color: '#6b21a8' }}>{telemetry.vehicle_census?.pedestrians ?? telemetry.vehicle_census?.pedestrian ?? 0}</div>
                   </div>
                   <div style={{ textAlign: 'center' }}>
                     <div style={{ fontSize: '11px', color: '#6b21a8', fontWeight: 700 }}>School Zone Children</div>
-                    <div style={{ fontSize: '24px', fontWeight: 900, color: '#6b21a8' }}>{telemetry.vehicle_census.children}</div>
+                    <div style={{ fontSize: '24px', fontWeight: 900, color: '#6b21a8' }}>{telemetry.vehicle_census?.children ?? telemetry.vehicle_census?.child ?? 0}</div>
                   </div>
                 </div>
               </div>

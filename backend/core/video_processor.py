@@ -69,7 +69,7 @@ class VideoPipelineManager:
         os.makedirs(self.challans_dir, exist_ok=True)
 
         # Core subsystems
-        self.detector = VehicleDetector(model_name="yolov8m.pt", conf_thresh=0.28)
+        self.detector = VehicleDetector(model_name="yolov8n.pt", conf_thresh=0.25)
         self.tracker = VehicleTracker(fps=25.0, px_to_meter=0.035)
         self.violation_detector = ViolationDetector(speed_limit_kmh=50.0)
         self.anpr = ANPREngine()
@@ -91,6 +91,7 @@ class VideoPipelineManager:
         self.cap = None
         self.mjpeg_reader = None
         self.last_real_frame = None
+        self.last_annotated_frame = None
         self.frame_idx = 0
         self.total_frames = 1
         self.cached_detections = []
@@ -111,19 +112,16 @@ class VideoPipelineManager:
         self.latest_stream_jpeg = None
         self.latest_telemetry = {}
         self.running = True
+        self.loop_footage = True
 
         # Launch dedicated background video broadcaster thread
         self.worker_thread = threading.Thread(target=self._stream_broadcaster_worker, daemon=True)
         self.worker_thread.start()
 
     def _stream_broadcaster_worker(self):
-        """Continuously runs the computer vision pipeline at smooth 25-30 FPS, caching latest frame and telemetry"""
-        print("[VideoPipeline] High-Speed Background Broadcaster Started.")
+        """Continuously runs the computer vision pipeline at calibrated video frame rate, caching latest frame and telemetry"""
+        print("[VideoPipeline] Live Video Broadcaster Started (Calibrated Real-time Frame Rate).")
         while self.running:
-            if self.is_paused:
-                time.sleep(0.04)
-                continue
-
             t0 = time.time()
             try:
                 frame_bytes, telemetry = self._step_pipeline()
@@ -132,10 +130,21 @@ class VideoPipelineManager:
                         self.latest_stream_jpeg = frame_bytes
                         self.latest_telemetry = telemetry
             except Exception as e:
-                pass
+                import traceback
+                print(f"[VideoPipeline Worker Exception]: {e}")
+                traceback.print_exc()
+
+            # Dynamic pacing based on calibrated video frame rate (target 25 FPS)
+            target_fps = getattr(self, "video_fps", 25.0)
+            if not target_fps or target_fps < 10.0 or target_fps > 60.0:
+                target_fps = 25.0
+            frame_duration = 1.0 / target_fps
 
             dt = time.time() - t0
-            time.sleep(max(0.005, 0.033 - dt))
+            if dt < frame_duration:
+                time.sleep(frame_duration - dt)
+            else:
+                time.sleep(0.002)
 
     def get_stream_frame(self) -> Tuple[Optional[bytes], Dict[str, Any]]:
         with self.stream_lock:
@@ -250,6 +259,9 @@ class VideoPipelineManager:
             if not self.cap.isOpened():
                 return False, f"Cannot open video file {target_path}"
 
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.video_fps = fps if (fps and 10.0 <= fps <= 60.0) else 25.0
+
             self.operating_mode = "footage"
             self.mode_source = "Footage Upload Analysis"
             self.custom_video_source = target_path
@@ -259,6 +271,7 @@ class VideoPipelineManager:
             self.analysis_in_progress = True
             self.analysis_complete = False
             self.is_paused = False
+            self.loop_footage = True
 
             # Reset analytics for clean footage census
             self.captured_plates.clear()
@@ -279,23 +292,67 @@ class VideoPipelineManager:
     def resume_footage(self):
         self.is_paused = False
 
+    def pause(self):
+        self.pause_footage()
+
+    def resume(self):
+        self.resume_footage()
+
+    def set_loop(self, loop: bool):
+        self.loop_footage = loop
+
     def restart_footage(self):
-        if self.custom_video_source:
-            self.start_footage_analysis(self.custom_video_source)
+        with self.cap_lock:
+            if self.custom_video_source and os.path.exists(self.custom_video_source):
+                if self.cap:
+                    self.cap.release()
+                self.cap = cv2.VideoCapture(self.custom_video_source)
+            elif self.cap and self.cap.isOpened():
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.frame_idx = 0
+            self.is_paused = False
+            self.analysis_complete = False
+            self.analysis_in_progress = True
 
     def get_footage_status(self) -> Dict[str, Any]:
         total = max(1, self.total_frames)
-        cur = min(self.frame_idx, total)
-        progress = 100.0 if self.analysis_complete else min(100.0, round((cur / total) * 100.0, 1))
+        cur = (self.frame_idx % total) if total > 0 else 0
+        if cur == 0 and self.frame_idx > 0:
+            cur = total
+        progress = round((cur / total) * 100.0, 1)
         return {
             "loaded": self.footage_loaded,
-            "in_progress": self.analysis_in_progress,
-            "completed": self.analysis_complete,
+            "in_progress": not self.is_paused,
+            "completed": False,
             "current_frame": cur,
             "total_frames": self.total_frames,
             "progress_pct": progress,
             "is_paused": self.is_paused,
+            "loop_enabled": True,
+            "fps": getattr(self, "video_fps", 25.0),
             "current_source": os.path.basename(self.custom_video_source) if self.custom_video_source else ""
+        }
+
+    @staticmethod
+    def _normalize_census(counts: Dict[str, int]) -> Dict[str, int]:
+        c = counts or {}
+        return {
+            "car": c.get("car", 0),
+            "cars": c.get("car", 0),
+            "two_wheeler": c.get("two_wheeler", 0),
+            "two_wheelers": c.get("two_wheeler", 0),
+            "auto_rickshaw": c.get("auto_rickshaw", 0),
+            "auto_rickshaws": c.get("auto_rickshaw", 0),
+            "bus": c.get("bus", 0),
+            "buses": c.get("bus", 0),
+            "truck": c.get("truck", 0),
+            "trucks": c.get("truck", 0),
+            "bicycle": c.get("bicycle", 0),
+            "bicycles": c.get("bicycle", 0),
+            "pedestrian": c.get("pedestrian", 0),
+            "pedestrians": c.get("pedestrian", 0),
+            "child": c.get("child", 0),
+            "children": c.get("child", 0),
         }
 
     # =========================================================================
@@ -360,23 +417,22 @@ class VideoPipelineManager:
 
         # 2. FOOTAGE MODE STANDBY OR COMPLETED
         if self.operating_mode == "footage":
-            if not self.footage_loaded or not self.analysis_in_progress:
-                if self.analysis_complete and self.last_real_frame is not None:
-                    ret, jpeg = cv2.imencode('.jpg', self.last_real_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    return jpeg.tobytes() if ret else None, self.last_stats
-                else:
-                    standby = self._generate_standby_frame(
-                        "FOOTAGE REPOSITORY READY",
-                        "Select a 4K CCTV Clip or Upload Custom Video",
-                        "Click 'Start 1-Time Forensic Analysis' to run frame-accurate census and ANPR."
-                    )
-                    ret, jpeg = cv2.imencode('.jpg', standby, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    return jpeg.tobytes() if ret else None, {
-                        "footage_loaded": False,
-                        "analysis_complete": False,
-                        "total_vehicles": 0,
-                        "congestion_index": 0.0
-                    }
+            if not self.footage_loaded:
+                standby = self._generate_standby_frame(
+                    "FOOTAGE REPOSITORY READY",
+                    "Select a 4K CCTV Clip or Upload Custom Video",
+                    "Click 'Start 1-Time Forensic Analysis' to run frame-accurate census and ANPR."
+                )
+                ret, jpeg = cv2.imencode('.jpg', standby, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                return jpeg.tobytes() if ret else None, {
+                    "footage_loaded": False,
+                    "analysis_complete": False,
+                    "total_vehicles": 0,
+                    "congestion_index": 0.0
+                }
+            if self.is_paused and self.last_annotated_frame is not None:
+                ret, jpeg = cv2.imencode('.jpg', self.last_annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                return jpeg.tobytes() if ret else None, self.last_stats
 
         # 3. READ FRAME FROM ACTIVE CAPTURE
         frame = None
@@ -392,18 +448,14 @@ class VideoPipelineManager:
                 if self.cap and self.cap.isOpened():
                     ret, cap_frame = self.cap.read()
                     if not ret:
-                        if self.operating_mode == "footage":
-                            self.analysis_complete = True
-                            self.analysis_in_progress = False
-                            self.is_paused = True
-                            print(f"[VideoPipeline] 1-Time Footage Analysis Reached EOF at Frame {self.frame_idx} of {self.total_frames}.")
-                            if self.last_real_frame is not None:
-                                ret, jpeg = cv2.imencode('.jpg', self.last_real_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                                return jpeg.tobytes() if ret else None, self.last_stats
-                            return None, self.last_stats
-                        else:
-                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        # Seamless Live Continuous Loop - only pause if user clicked Pause
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, cap_frame = self.cap.read()
+                        if not ret and self.custom_video_source and os.path.exists(self.custom_video_source):
+                            self.cap.release()
+                            self.cap = cv2.VideoCapture(self.custom_video_source)
                             ret, cap_frame = self.cap.read()
+                        self.frame_idx = 0
                     if ret:
                         frame = cap_frame
                         self.last_real_frame = cap_frame.copy()
@@ -580,6 +632,7 @@ class VideoPipelineManager:
                 )
 
         self._render_hud(frame, active_tracks, signal_data, t_start)
+        self.last_annotated_frame = frame.copy()
 
         total_veh = sum(lane_counts.values())
         congestion_index = min(100.0, round((total_veh / 14.0) * 100, 1))
@@ -591,7 +644,7 @@ class VideoPipelineManager:
             "progress_pct": min(100.0, round((self.frame_idx / max(1, self.total_frames)) * 100, 1)) if "Footage" in self.mode_source else 100.0,
             "analysis_complete": self.analysis_complete,
             "total_vehicles": total_veh,
-            "vehicle_census": self.vehicle_class_counts.copy(),
+            "vehicle_census": self._normalize_census(self.vehicle_class_counts),
             "congestion_index": congestion_index,
             "lane_counts": lane_counts,
             "signal_state": signal_data,
@@ -640,9 +693,9 @@ class VideoPipelineManager:
         cv2.putText(frame, f"ITMS AI [{mode_badge}] | {fps:.1f} FPS{prog_text}", (18, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 200), 1)
         cv2.putText(frame, f"Active Vehicles: {len(active_tracks)} | Census Total: {len(self.seen_track_ids)}", (18, 47), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
 
-        if self.analysis_complete:
-            cv2.rectangle(frame, (10, 60), (450, 90), (0, 150, 50), -1)
-            cv2.putText(frame, "ANALYSIS COMPLETED - 100% EXAMINED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
+        if self.is_paused:
+            cv2.rectangle(frame, (10, 60), (330, 92), (20, 120, 200), -1)
+            cv2.putText(frame, "PLAYBACK PAUSED (CLICK RESUME)", (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2)
 
         active_lane = signal_data["active_green_lane"]
         phase = signal_data["phase_state"]

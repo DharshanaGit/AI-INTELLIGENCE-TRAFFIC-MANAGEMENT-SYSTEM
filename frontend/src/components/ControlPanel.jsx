@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Upload, Play, Square, Sliders, BellRing, Video } from 'lucide-react';
 import styles from '../styles/Dashboard.module.css';
 
-const API_BASE = "http://localhost:8000/api/v1";
+const API_BASE = "http://localhost:8005/api/v1";
 
 export default function ControlPanel({
   isProcessing,
